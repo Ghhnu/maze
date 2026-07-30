@@ -8,7 +8,7 @@ import net.minecraft.block.entity.MobSpawnerBlockEntity;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
-import net.minecraft.enchantment.ItemEnchantmentsComponent;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.entity.EntityType;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
