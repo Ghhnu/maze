@@ -2,9 +2,7 @@ package com.mazegen.maze;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.BlockState;
-import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayDeque;
@@ -12,37 +10,71 @@ import java.util.Deque;
 import java.util.List;
 
 /**
- * Coloca los bloques de un laberinto repartidos en varios ticks del servidor para no
- * congelarlo con cientos de miles de colocaciones de golpe en el mismo tick.
+ * Coloca bloques repartidos en varios ticks del servidor para no congelarlo con cientos de
+ * miles de colocaciones de golpe en el mismo tick. Se usa tanto para la construcción inicial
+ * de un laberinto como para los pequeños "retoques" periódicos de {@link MazeLiveManager}.
  * <p>
- * Sencillo y de un solo hilo de trabajo: si se piden varios laberintos a la vez, se
- * procesan en orden de llegada (uno detrás de otro), no en paralelo.
+ * Los trabajos se agrupan en {@link Batch}: cuando todos los bloques de un lote están
+ * colocados se ejecuta su callback (mensaje de progreso, registrar el laberinto para que
+ * empiece a cambiar solo, etc.). Varios lotes (incluso de mundos distintos) pueden convivir
+ * en la misma cola; se procesan en orden de llegada.
  */
 public final class MazeBuildQueue {
 
-    public record BlockJob(BlockPos pos, BlockState state) {}
+    /** Callback opcional que se ejecuta justo después de colocar un bloque concreto. */
+    @FunctionalInterface
+    public interface PostPlace {
+        void apply(ServerWorld world, BlockPos pos);
+    }
+
+    public static final class Batch {
+        final int total;
+        int placed = 0;
+        final Runnable onComplete;
+
+        public Batch(int total, Runnable onComplete) {
+            this.total = total;
+            this.onComplete = onComplete;
+        }
+    }
+
+    public record BlockJob(ServerWorld world, BlockPos pos, BlockState state, PostPlace postPlace, Batch batch) {
+        public BlockJob(ServerWorld world, BlockPos pos, BlockState state) {
+            this(world, pos, state, null, null);
+        }
+
+        public BlockJob(ServerWorld world, BlockPos pos, BlockState state, PostPlace postPlace) {
+            this(world, pos, state, postPlace, null);
+        }
+
+        BlockJob withBatch(Batch batch) {
+            return new BlockJob(world, pos, state, postPlace, batch);
+        }
+    }
 
     private static final int BLOCKS_PER_TICK = 8000;
 
     private static final Deque<BlockJob> queue = new ArrayDeque<>();
     private static boolean registered = false;
 
-    private static ServerWorld currentWorld;
-    private static ServerPlayerEntity currentPlayer;
-    private static long jobStartMillis;
-    private static int jobTotalBlocks;
-    private static int jobPlacedSoFar;
-
     private MazeBuildQueue() {}
 
-    public static void submit(ServerWorld world, List<BlockJob> jobs, ServerPlayerEntity player) {
+    /** Encola una lista de trabajos como un único lote silencioso (sin callback de finalización). */
+    public static void submit(List<BlockJob> jobs) {
+        submit(jobs, null);
+    }
+
+    /** Encola una lista de trabajos como un único lote; onComplete se ejecuta cuando el último se coloca. */
+    public static void submit(List<BlockJob> jobs, Runnable onComplete) {
         ensureRegistered();
-        queue.addAll(jobs);
-        currentWorld = world;
-        currentPlayer = player;
-        jobStartMillis = System.currentTimeMillis();
-        jobTotalBlocks = jobs.size();
-        jobPlacedSoFar = 0;
+        if (jobs.isEmpty()) {
+            if (onComplete != null) onComplete.run();
+            return;
+        }
+        Batch batch = new Batch(jobs.size(), onComplete);
+        for (BlockJob job : jobs) {
+            queue.add(job.withBatch(batch));
+        }
     }
 
     private static void ensureRegistered() {
@@ -52,27 +84,24 @@ public final class MazeBuildQueue {
     }
 
     private static void tick() {
-        if (queue.isEmpty() || currentWorld == null) return;
+        if (queue.isEmpty()) return;
 
         int placedThisTick = 0;
         while (!queue.isEmpty() && placedThisTick < BLOCKS_PER_TICK) {
             BlockJob job = queue.poll();
-            currentWorld.setBlockState(job.pos(), job.state(), 3);
-            placedThisTick++;
-            jobPlacedSoFar++;
-        }
-
-        if (queue.isEmpty()) {
-            double seconds = (System.currentTimeMillis() - jobStartMillis) / 1000.0;
-            if (currentPlayer != null && currentPlayer.isAlive()) {
-                currentPlayer.sendMessage(
-                        Text.literal(String.format(
-                                "§6[MazeGen] §fLaberinto completado: §a%d §fbloques en §a%.1fs§f.",
-                                jobTotalBlocks, seconds)),
-                        false);
+            job.world().setBlockState(job.pos(), job.state(), 3);
+            if (job.postPlace() != null) {
+                job.postPlace().apply(job.world(), job.pos());
             }
-            currentWorld = null;
-            currentPlayer = null;
+            placedThisTick++;
+
+            Batch batch = job.batch();
+            if (batch != null) {
+                batch.placed++;
+                if (batch.placed >= batch.total && batch.onComplete != null) {
+                    batch.onComplete.run();
+                }
+            }
         }
     }
 }

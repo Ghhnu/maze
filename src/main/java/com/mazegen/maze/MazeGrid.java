@@ -12,34 +12,45 @@ import java.util.Random;
  * Genera la "planta" lógica de un laberinto perfecto (sin bucles, siempre resoluble)
  * usando el algoritmo de backtracking aleatorio (randomized DFS) sobre una rejilla de celdas.
  * <p>
- * Cada celda ocupa 3 bloques (2 de pasillo + 1 de pared compartida con la vecina), así que
- * los pasillos resultantes siempre tienen 2 bloques de ancho.
+ * Cada celda ocupa {@link #FLOOR_W} bloques de pasillo transitable, separada de sus vecinas
+ * por un muro de {@link #WALL_W} bloques de grosor. Al abrir una conexión entre dos celdas se
+ * talla un hueco de {@code FLOOR_W} de ancho a través de ese muro.
  * <p>
  * {@link #open} es la rejilla a nivel de bloque: true = suelo transitable, false = pared sólida.
+ * Soporta rejillas no cuadradas (cellCountX distinto de cellCountZ).
  */
 public class MazeGrid {
+
+    /** Ancho de pasillo, en bloques. */
+    public static final int FLOOR_W = 3;
+    /** Grosor de las paredes (incluido el borde exterior), en bloques. */
+    public static final int WALL_W = 3;
+    /** Bloques que ocupa una celda + su muro siguiente. */
+    public static final int STEP = FLOOR_W + WALL_W;
 
     private static final int[] DX = {1, -1, 0, 0};
     private static final int[] DZ = {0, 0, 1, -1};
     // dir 0 = este (+X), 1 = oeste (-X), 2 = sur (+Z), 3 = norte (-Z)
 
-    public final int cellCount;      // celdas por lado
-    public final int blockSize;      // cellCount * 3 + 1
-    public final boolean[][] open;   // [x][z] a nivel de bloque
+    public final int cellCountX, cellCountZ;   // celdas por lado (X y Z pueden diferir)
+    public final int blockSizeX, blockSizeZ;   // cellCount * STEP + WALL_W
+    public final boolean[][] open;             // [x][z] a nivel de bloque
 
     public int entranceCellX, entranceCellZ, entranceDir;
     public int exitCellX, exitCellZ, exitDir;
 
-    public MazeGrid(int cellCount, long seed) {
-        this.cellCount = cellCount;
-        this.blockSize = cellCount * 3 + 1;
-        this.open = new boolean[blockSize][blockSize];
+    public MazeGrid(int cellCountX, int cellCountZ, long seed) {
+        this.cellCountX = cellCountX;
+        this.cellCountZ = cellCountZ;
+        this.blockSizeX = cellCountX * STEP + WALL_W;
+        this.blockSizeZ = cellCountZ * STEP + WALL_W;
+        this.open = new boolean[blockSizeX][blockSizeZ];
         generate(seed);
     }
 
     private void generate(long seed) {
         Random rnd = new Random(seed);
-        boolean[][] visited = new boolean[cellCount][cellCount];
+        boolean[][] visited = new boolean[cellCountX][cellCountZ];
         Deque<int[]> stack = new ArrayDeque<>();
 
         visited[0][0] = true;
@@ -57,12 +68,12 @@ public class MazeGrid {
             for (int d : dirs) {
                 int nx = cx + DX[d];
                 int nz = cz + DZ[d];
-                if (nx < 0 || nz < 0 || nx >= cellCount || nz >= cellCount) continue;
+                if (nx < 0 || nz < 0 || nx >= cellCountX || nz >= cellCountZ) continue;
                 if (visited[nx][nz]) continue;
 
                 visited[nx][nz] = true;
                 carveCellFloor(nx, nz);
-                carveConnection(cx, cz, d);
+                setConnectorRegion(cx, cz, d, true);
                 stack.push(new int[]{nx, nz});
                 carved = true;
                 break;
@@ -73,40 +84,70 @@ public class MazeGrid {
         pickEntranceAndExit(rnd);
     }
 
-    // Offset +1: la columna/fila 0 y la última quedan siempre reservadas como muro
-    // perimetral (nunca se tallan), así el recinto queda cerrado por los 4 lados
-    // salvo en los huecos explícitos de entrada y salida.
-    private void carveCellFloor(int cx, int cz) {
-        int bx = cx * 3 + 1, bz = cz * 3 + 1;
-        open[bx][bz] = true;
-        open[bx + 1][bz] = true;
-        open[bx][bz + 1] = true;
-        open[bx + 1][bz + 1] = true;
+    public int cellBaseX(int cx) {
+        return cx * STEP + WALL_W;
     }
 
-    private void carveConnection(int cx, int cz, int dir) {
-        int bx = cx * 3 + 1, bz = cz * 3 + 1;
-        switch (dir) {
-            case 0 -> { open[bx + 2][bz] = true; open[bx + 2][bz + 1] = true; } // este
-            case 1 -> { open[bx - 1][bz] = true; open[bx - 1][bz + 1] = true; } // oeste
-            case 2 -> { open[bx][bz + 2] = true; open[bx + 1][bz + 2] = true; } // sur
-            case 3 -> { open[bx][bz - 1] = true; open[bx + 1][bz - 1] = true; } // norte
+    public int cellBaseZ(int cz) {
+        return cz * STEP + WALL_W;
+    }
+
+    // Offset +WALL_W: la banda de borde queda siempre reservada como muro perimetral
+    // (nunca se talla), así el recinto queda cerrado por los 4 lados salvo en los
+    // huecos explícitos de entrada y salida.
+    private void carveCellFloor(int cx, int cz) {
+        int bx = cellBaseX(cx), bz = cellBaseZ(cz);
+        for (int x = bx; x < bx + FLOOR_W; x++) {
+            for (int z = bz; z < bz + FLOOR_W; z++) {
+                open[x][z] = true;
+            }
         }
     }
 
-    private boolean cellsConnected(int cx, int cz, int dir) {
-        int bx = cx * 3 + 1, bz = cz * 3 + 1;
+    /**
+     * Devuelve {x0, x1, z0, z1} (inclusive) del bloque de bloques que conecta la celda
+     * (cx, cz) con su vecina en la dirección dir, atravesando el muro de WALL_W de grosor.
+     * También sirve para calcular el hueco de salida al exterior en un borde del recinto,
+     * ya que la banda perimetral tiene exactamente WALL_W de grosor por construcción.
+     */
+    public int[] connectorBounds(int cx, int cz, int dir) {
+        int bx = cellBaseX(cx), bz = cellBaseZ(cz);
         return switch (dir) {
-            case 0 -> open[bx + 2][bz];
-            case 1 -> open[bx - 1][bz];
-            case 2 -> open[bx][bz + 2];
-            case 3 -> open[bx][bz - 1];
-            default -> false;
+            case 0 -> new int[]{bx + FLOOR_W, bx + FLOOR_W + WALL_W - 1, bz, bz + FLOOR_W - 1};          // este
+            case 1 -> new int[]{bx - WALL_W, bx - 1, bz, bz + FLOOR_W - 1};                               // oeste
+            case 2 -> new int[]{bx, bx + FLOOR_W - 1, bz + FLOOR_W, bz + FLOOR_W + WALL_W - 1};           // sur
+            default -> new int[]{bx, bx + FLOOR_W - 1, bz - WALL_W, bz - 1};                              // norte
         };
     }
 
+    public void setConnectorRegion(int cx, int cz, int dir, boolean value) {
+        int[] b = connectorBounds(cx, cz, dir);
+        for (int x = b[0]; x <= b[1]; x++) {
+            for (int z = b[2]; z <= b[3]; z++) {
+                open[x][z] = value;
+            }
+        }
+    }
+
+    public boolean cellsConnected(int cx, int cz, int dir) {
+        int[] b = connectorBounds(cx, cz, dir);
+        return open[b[0]][b[2]];
+    }
+
+    /** Todas las aristas interiores (celda-celda) del laberinto, cada una representada una vez. */
+    public List<int[]> interiorEdges() {
+        List<int[]> edges = new ArrayList<>();
+        for (int cx = 0; cx < cellCountX; cx++) {
+            for (int cz = 0; cz < cellCountZ; cz++) {
+                if (cx + 1 < cellCountX) edges.add(new int[]{cx, cz, 0});
+                if (cz + 1 < cellCountZ) edges.add(new int[]{cx, cz, 2});
+            }
+        }
+        return edges;
+    }
+
     private int[][] bfsDistances(int sx, int sz) {
-        int[][] dist = new int[cellCount][cellCount];
+        int[][] dist = new int[cellCountX][cellCountZ];
         for (int[] row : dist) Arrays.fill(row, -1);
         Deque<int[]> q = new ArrayDeque<>();
         dist[sx][sz] = 0;
@@ -116,7 +157,7 @@ public class MazeGrid {
             int cx = c[0], cz = c[1];
             for (int d = 0; d < 4; d++) {
                 int nx = cx + DX[d], nz = cz + DZ[d];
-                if (nx < 0 || nz < 0 || nx >= cellCount || nz >= cellCount) continue;
+                if (nx < 0 || nz < 0 || nx >= cellCountX || nz >= cellCountZ) continue;
                 if (dist[nx][nz] != -1) continue;
                 if (!cellsConnected(cx, cz, d)) continue;
                 dist[nx][nz] = dist[cx][cz] + 1;
@@ -135,9 +176,9 @@ public class MazeGrid {
         int[][] dist = bfsDistances(0, 0);
         int bestX = 0, bestZ = 0, bestDist = -1, bestDir = 2;
 
-        for (int i = 0; i < cellCount; i++) {
-            for (int j = 0; j < cellCount; j++) {
-                boolean edge = (i == 0 || j == 0 || i == cellCount - 1 || j == cellCount - 1);
+        for (int i = 0; i < cellCountX; i++) {
+            for (int j = 0; j < cellCountZ; j++) {
+                boolean edge = (i == 0 || j == 0 || i == cellCountX - 1 || j == cellCountZ - 1);
                 if (!edge) continue;
                 if (i == entranceCellX && j == entranceCellZ) continue;
                 if (dist[i][j] > bestDist) {
@@ -145,7 +186,7 @@ public class MazeGrid {
                     bestX = i;
                     bestZ = j;
                     if (i == 0) bestDir = 1;
-                    else if (i == cellCount - 1) bestDir = 0;
+                    else if (i == cellCountX - 1) bestDir = 0;
                     else if (j == 0) bestDir = 3;
                     else bestDir = 2;
                 }
@@ -165,7 +206,7 @@ public class MazeGrid {
     }
 
     private boolean isCellFloorBlock(int x, int z, int cx, int cz) {
-        int bx = cx * 3 + 1, bz = cz * 3 + 1;
-        return (x == bx || x == bx + 1) && (z == bz || z == bz + 1);
+        int bx = cellBaseX(cx), bz = cellBaseZ(cz);
+        return x >= bx && x < bx + FLOOR_W && z >= bz && z < bz + FLOOR_W;
     }
 }
